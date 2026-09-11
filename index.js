@@ -11,6 +11,27 @@ const RC_CLIENT_ID = process.env.RC_CLIENT_ID;
 const RC_CLIENT_SECRET = process.env.RC_CLIENT_SECRET;
 const RC_JWT = process.env.RC_JWT;
 
+// === RingCX (Contact Center) ===
+const RINGCX_ACCOUNT_ID = process.env.RINGCX_ACCOUNT_ID || '50560001';
+const RINGCX_GATE_GROUP_ID = '1973';
+
+const STATE_GATE_MAP = {
+  'AK': 12530, 'AL': 12475, 'AR': 12476, 'AZ': 12477, 'CA': 12478,
+  'CO': 12479, 'CT': 12480, 'DC': 12481, 'DE': 12482, 'FL': 12483,
+  'GA': 12484, 'HI': 12485, 'IA': 12486, 'ID': 12487, 'IL': 12488,
+  'IN': 12489, 'KS': 12490, 'KY': 12491, 'LA': 12492, 'MA': 12493,
+  'MD': 12494, 'ME': 12495, 'MI': 12496, 'MN': 12497, 'MO': 12499,
+  'MS': 12500, 'MT': 12501, 'NC': 12502, 'ND': 12503, 'NE': 12504,
+  'NH': 12505, 'NJ': 12506, 'NM': 12507, 'NV': 12508, 'NY': 12509,
+  'OH': 12510, 'OK': 12511, 'OR': 12512, 'PA': 12513, 'RI': 12514,
+  'SC': 12515, 'SD': 12516, 'TN': 12517, 'TX': 12518, 'UT': 12519,
+  'VA': 12520, 'VT': 12521, 'WA': 12522, 'WI': 12523, 'WV': 12524,
+  'WY': 12525
+};
+
+let ringcxTokenCache = null;
+let ringcxTokenExpiry = 0;
+
 let tokenCache = null;
 let tokenExpiry = 0;
 
@@ -266,6 +287,66 @@ async function getAccessToken() {
     });
     req.on('error', reject);
     req.write(body);
+    req.end();
+  });
+}
+
+async function getRingCXToken() {
+  const now = Date.now();
+  if (ringcxTokenCache && now < ringcxTokenExpiry) return ringcxTokenCache;
+  const rcToken = await getAccessToken();
+  return new Promise((resolve, reject) => {
+    const body = `rcAccessToken=${encodeURIComponent(rcToken)}`;
+    const options = {
+      hostname: 'engage.ringcentral.com',
+      path: '/api/auth/login/rc/accesstoken',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          if (json.accessToken) {
+            ringcxTokenCache = json.accessToken;
+            ringcxTokenExpiry = now + (50 * 60 * 1000);
+            console.log('[RINGCX] Token obtained');
+            resolve(ringcxTokenCache);
+          } else {
+            reject(new Error('No RingCX token: ' + data.slice(0, 300)));
+          }
+        } catch(e) {
+          reject(new Error('Failed to parse RingCX token: ' + data.slice(0, 300)));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+function ringcxGet(token, path) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'engage.ringcentral.com',
+      path,
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${token}` }
+    }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+        catch(e) { resolve({ status: res.statusCode, raw: data.slice(0, 2000) }); }
+      });
+    });
+    req.on('error', reject);
     req.end();
   });
 }
@@ -633,7 +714,7 @@ const server = http.createServer(async (req, res) => {
     }));
   }
 
-  // Legacy: state-based availability /availability?state=FL
+  // RingCX state-based availability /availability?state=FL
   if (pathname === '/availability') {
     const state = url.searchParams.get('state');
     if (!state) {
@@ -641,17 +722,40 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ available: false, error: 'Missing state parameter. Use ?state=TX' }));
     }
     const stateUpper = state.toUpperCase().trim();
-    const office = url.searchParams.get('office') ? url.searchParams.get('office').trim() : null;
+    const gateId = STATE_GATE_MAP[stateUpper];
+    if (!gateId) {
+      res.writeHead(400);
+      return res.end(JSON.stringify({ available: false, error: `Unknown state: ${stateUpper}` }));
+    }
     const minAgentsParam = url.searchParams.get('min_agents');
     const minAgents = minAgentsParam ? parseInt(minAgentsParam, 10) : null;
     try {
-      const result = await checkAvailabilityWithMinAgents(stateUpper, office, minAgents);
+      const token = await getRingCXToken();
+      const result = await ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/agentSessions`);
+      const sessions = Array.isArray(result.body) ? result.body :
+        (result.body && (result.body.agentSessions || result.body.records)) || [];
+      // Filter agents logged into this gate
+      const inQueue = sessions.filter(s => {
+        const queues = s.loginQueues || s.agentGateAssignments || s.queues || [];
+        return queues.some(q => String(q.gateId || q.id || q.gate && q.gate.id) === String(gateId));
+      });
+      const availableAgents = inQueue.filter(s =>
+        (s.loginState || s.currentState || s.agentState || '').toUpperCase() === 'AVAILABLE'
+      );
+      const count = availableAgents.length;
+      const isAvailable = minAgents ? count >= minAgents : count > 0;
       res.writeHead(200);
-      return res.end(JSON.stringify(result));
+      return res.end(JSON.stringify({
+        available: isAvailable,
+        agents: count,
+        total_in_queue: inQueue.length,
+        state: stateUpper,
+        gate_id: gateId,
+        ...(minAgents && { min_agents: minAgents })
+      }));
     } catch (err) {
-      console.error('Error:', err.message);
-      const status = err.message && err.message.includes('CMN-301') ? 200 : 500;
-      res.writeHead(status);
+      console.error('[RINGCX] availability error:', err.message);
+      res.writeHead(500);
       return res.end(JSON.stringify({ available: false, error: err.message }));
     }
   }
@@ -764,6 +868,22 @@ const server = http.createServer(async (req, res) => {
   }
 
 
+
+  // Debug: RingCX agent sessions
+  if (pathname === '/debug/ringcx') {
+    try {
+      const token = await getRingCXToken();
+      const [sessions, gates] = await Promise.all([
+        ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/agentSessions`),
+        ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/gateGroups/${RINGCX_GATE_GROUP_ID}/gates?perPage=10`)
+      ]);
+      res.writeHead(200);
+      return res.end(JSON.stringify({ sessions, gates }, null, 2));
+    } catch(err) {
+      res.writeHead(500);
+      return res.end(JSON.stringify({ error: err.message }));
+    }
+  }
 
   // Debug: all extensions/groups in account
   if (pathname === '/debug/all') {
@@ -895,20 +1015,18 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/queues') {
-    try {
-      const token = await getAccessToken();
-      const queuesData = await getQueuesCached(token);
-      const queues = queuesData.records || [];
-      res.writeHead(200);
-      return res.end(JSON.stringify({
-        total: queues.length,
-        queues: queues.map(q => ({ id: q.id, name: q.name }))
-      }));
-    } catch (err) {
-      console.error('Error:', err.message);
-      res.writeHead(500);
-      return res.end(JSON.stringify({ error: err.message }));
-    }
+    const gates = Object.entries(STATE_GATE_MAP).map(([state, gateId]) => ({
+      state,
+      gate_id: gateId,
+      name: `${state} - Standard vs Preferred`
+    }));
+    res.writeHead(200);
+    return res.end(JSON.stringify({
+      total: gates.length,
+      gate_group_id: RINGCX_GATE_GROUP_ID,
+      account_id: RINGCX_ACCOUNT_ID,
+      queues: gates
+    }));
   }
 
   // Debug: all agents presence

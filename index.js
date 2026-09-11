@@ -764,6 +764,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   // List all queues
+  // Debug: raw RC response for queues
+  if (pathname === '/queues/raw') {
+    try {
+      const token = await getAccessToken();
+      const queuesData = await getQueues(token);
+      res.writeHead(200);
+      return res.end(JSON.stringify(queuesData));
+    } catch (err) {
+      res.writeHead(500);
+      return res.end(JSON.stringify({ error: err.message }));
+    }
+  }
+
   if (pathname === '/queues') {
     try {
       const token = await getAccessToken();

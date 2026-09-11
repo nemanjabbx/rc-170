@@ -302,8 +302,8 @@ async function getRingCXToken() {
   return new Promise((resolve, reject) => {
     const body = `rcAccessToken=${encodeURIComponent(rcToken)}&rcTokenType=Bearer`;
     const options = {
-      hostname: 'engage.ringcentral.com',
-      path: '/api/public/auth/login/rc/accesstoken',
+      hostname: 'ringcx.ringcentral.com',
+      path: '/api/auth/login/rc/accesstoken?includeRefresh=true',
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -336,12 +336,16 @@ async function getRingCXToken() {
 }
 
 function ringcxGet(token, path, hostname) {
+  const isApiKey = RINGCX_API_KEY && token === RINGCX_API_KEY;
+  const headers = isApiKey
+    ? { 'X-Auth-Token': token }
+    : { 'Authorization': `Bearer ${token}` };
   return new Promise((resolve, reject) => {
     const req = https.request({
-      hostname: hostname || 'engage.ringcentral.com',
+      hostname: hostname || 'ringcx.ringcentral.com',
       path,
       method: 'GET',
-      headers: { 'Authorization': `Bearer ${token}` }
+      headers
     }, (res) => {
       let data = '';
       res.on('data', c => data += c);
@@ -882,19 +886,19 @@ const server = http.createServer(async (req, res) => {
         sessions_cx, gates_cx,
         agents_cx
       ] = await Promise.all([
-        ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/agentSessions`, 'engage.ringcentral.com'),
-        ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/gateGroups/${RINGCX_GATE_GROUP_ID}/gates?perPage=5`, 'engage.ringcentral.com'),
-        ringcxGet(token, `/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/agentSessions`, 'ringcx.ringcentral.com'),
-        ringcxGet(token, `/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/queues?perPage=5`, 'ringcx.ringcentral.com'),
-        ringcxGet(token, `/api/v1/admin/agents?perPage=3`, 'ringcx.ringcentral.com')
+        ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/agentSessions`),
+        ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/gateGroups/${RINGCX_GATE_GROUP_ID}/gates?perPage=5`),
+        ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/agents?perPage=3`),
+        ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/gateGroups?perPage=5`),
+        ringcxGet(token, `/voice/api/v1/admin/token`)
       ]);
       res.writeHead(200);
       return res.end(JSON.stringify({
-        engage_sessions: sessions_engage,
-        engage_gates: gates_engage,
-        ringcx_sessions: sessions_cx,
-        ringcx_queues: gates_cx,
-        ringcx_agents: agents_cx
+        agent_sessions: sessions_engage,
+        gate_groups: gates_engage,
+        agents: sessions_cx,
+        gate_group_list: gates_cx,
+        token_info: agents_cx
       }, null, 2));
     } catch(err) {
       res.writeHead(500);

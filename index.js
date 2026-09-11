@@ -15,6 +15,8 @@ const RC_JWT = process.env.RC_JWT;
 const RINGCX_ACCOUNT_ID = process.env.RINGCX_ACCOUNT_ID || '50560001';
 const RINGCX_GATE_GROUP_ID = '1973';
 const RINGCX_API_KEY = process.env.RINGCX_API_KEY || null;
+const CLIENT_JWT = process.env.CLIENT_JWT || null;
+const CLIENT_PING_HOST = 'ping.lifepolicies-support.com';
 
 const STATE_GATE_MAP = {
   'AK': 12530, 'AL': 12475, 'AR': 12476, 'AZ': 12477, 'CA': 12478,
@@ -722,7 +724,7 @@ const server = http.createServer(async (req, res) => {
     }));
   }
 
-  // RingCX state-based availability /availability?state=FL
+  // Availability via client ping API /availability?state=FL
   if (pathname === '/availability') {
     const state = url.searchParams.get('state');
     if (!state) {
@@ -730,41 +732,43 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ available: false, error: 'Missing state parameter. Use ?state=TX' }));
     }
     const stateUpper = state.toUpperCase().trim();
-    const gateId = STATE_GATE_MAP[stateUpper];
-    if (!gateId) {
-      res.writeHead(400);
-      return res.end(JSON.stringify({ available: false, error: `Unknown state: ${stateUpper}` }));
+    const campaign = url.searchParams.get('campaign') || 'standard';
+    if (!CLIENT_JWT) {
+      res.writeHead(500);
+      return res.end(JSON.stringify({ available: false, error: 'CLIENT_JWT env var not set' }));
     }
-    const minAgentsParam = url.searchParams.get('min_agents');
-    const minAgents = minAgentsParam ? parseInt(minAgentsParam, 10) : null;
     try {
-      const token = await getRingCXToken();
-      const result = await ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/agentSessions`);
-      const sessions = Array.isArray(result.body) ? result.body :
-        (result.body && (result.body.agentSessions || result.body.records)) || [];
-      // Filter agents logged into this gate
-      const inQueue = sessions.filter(s => {
-        const queues = s.loginQueues || s.agentGateAssignments || s.queues || [];
-        return queues.some(q => String(q.gateId || q.id || q.gate && q.gate.id) === String(gateId));
+      const pingResult = await new Promise((resolve, reject) => {
+        const req = https.request({
+          hostname: CLIENT_PING_HOST,
+          path: `/ping?campaign=${encodeURIComponent(campaign)}&state=${encodeURIComponent(stateUpper)}`,
+          method: 'GET',
+          headers: { 'Authorization': `Bearer ${CLIENT_JWT}` }
+        }, (r) => {
+          let d = '';
+          r.on('data', c => d += c);
+          r.on('end', () => {
+            try { resolve(JSON.parse(d)); }
+            catch(e) { reject(new Error('Parse error: ' + d.slice(0, 200))); }
+          });
+        });
+        req.on('error', reject);
+        req.end();
       });
-      const availableAgents = inQueue.filter(s =>
-        (s.loginState || s.currentState || s.agentState || '').toUpperCase() === 'AVAILABLE'
-      );
-      const count = availableAgents.length;
-      const isAvailable = minAgents ? count >= minAgents : count > 0;
       res.writeHead(200);
       return res.end(JSON.stringify({
-        available: isAvailable,
-        agents: count,
-        total_in_queue: inQueue.length,
+        available: pingResult.accept === true,
+        accept: pingResult.accept,
         state: stateUpper,
-        gate_id: gateId,
-        ...(minAgents && { min_agents: minAgents })
+        campaign: pingResult.campaign || campaign,
+        queue_open: pingResult.queue_open,
+        data_age_seconds: pingResult.data_age_seconds,
+        raw: pingResult
       }));
     } catch (err) {
-      console.error('[RINGCX] availability error:', err.message);
-      res.writeHead(500);
-      return res.end(JSON.stringify({ available: false, error: err.message }));
+      console.error('[PING] availability error:', err.message);
+      res.writeHead(200);
+      return res.end(JSON.stringify({ available: false, accept: false, error: err.message }));
     }
   }
 

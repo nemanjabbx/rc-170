@@ -296,7 +296,7 @@ async function getRingCXToken() {
   if (ringcxTokenCache && now < ringcxTokenExpiry) return ringcxTokenCache;
   const rcToken = await getAccessToken();
   return new Promise((resolve, reject) => {
-    const body = `rcAccessToken=${encodeURIComponent(rcToken)}`;
+    const body = `rcAccessToken=${encodeURIComponent(rcToken)}&rcTokenType=Bearer`;
     const options = {
       hostname: 'engage.ringcentral.com',
       path: '/api/auth/login/rc/accesstoken',

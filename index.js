@@ -335,10 +335,10 @@ async function getRingCXToken() {
   });
 }
 
-function ringcxGet(token, path) {
+function ringcxGet(token, path, hostname) {
   return new Promise((resolve, reject) => {
     const req = https.request({
-      hostname: 'engage.ringcentral.com',
+      hostname: hostname || 'engage.ringcentral.com',
       path,
       method: 'GET',
       headers: { 'Authorization': `Bearer ${token}` }
@@ -877,12 +877,25 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/debug/ringcx') {
     try {
       const token = await getRingCXToken();
-      const [sessions, gates] = await Promise.all([
-        ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/agentSessions`),
-        ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/gateGroups/${RINGCX_GATE_GROUP_ID}/gates?perPage=10`)
+      const [
+        sessions_engage, gates_engage,
+        sessions_cx, gates_cx,
+        agents_cx
+      ] = await Promise.all([
+        ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/agentSessions`, 'engage.ringcentral.com'),
+        ringcxGet(token, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/gateGroups/${RINGCX_GATE_GROUP_ID}/gates?perPage=5`, 'engage.ringcentral.com'),
+        ringcxGet(token, `/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/agentSessions`, 'ringcx.ringcentral.com'),
+        ringcxGet(token, `/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/queues?perPage=5`, 'ringcx.ringcentral.com'),
+        ringcxGet(token, `/api/v1/admin/agents?perPage=3`, 'ringcx.ringcentral.com')
       ]);
       res.writeHead(200);
-      return res.end(JSON.stringify({ sessions, gates }, null, 2));
+      return res.end(JSON.stringify({
+        engage_sessions: sessions_engage,
+        engage_gates: gates_engage,
+        ringcx_sessions: sessions_cx,
+        ringcx_queues: gates_cx,
+        ringcx_agents: agents_cx
+      }, null, 2));
     } catch(err) {
       res.writeHead(500);
       return res.end(JSON.stringify({ error: err.message }));

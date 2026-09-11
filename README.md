@@ -16,9 +16,50 @@ A lightweight Node.js server that acts as a middleware between **Ringba** and **
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | Health check — returns `{"status":"ok"}` |
-| `GET /availability?state=TX` | State-based availability check (2-letter state code) |
-| `GET /agent?id=x7k2m` | Agent-specific availability check by agent ID |
+| `GET /health` | Health check |
+| `GET /queues` | List all RingCentral queues |
+| `GET /queue?name=Florida` | Check a specific queue by name |
+| `GET /availability?state=TX` | State availability check (2-letter code) |
+| `GET /availability?state=TX&min_agents=2` | Require at least 2 free agents |
+| `GET /agent?ext=183` | Check a specific agent by RC extension number |
+| `GET /webhook-status` | Webhook & cache status |
+
+### Quick Reference
+
+**List all queues:**
+```
+GET /queues
+```
+Returns all queues from RingCentral with their names and IDs.
+
+**Check a specific queue:**
+```
+GET /queue?name=Florida
+GET /queue?name=Florida%20-%20Tampa
+```
+Returns `available`, agent count, and full member presence list.
+
+**Check a specific agent:**
+```
+GET /agent?ext=183
+```
+Returns:
+```json
+{
+  "available": true,
+  "ext": "183",
+  "name": "ORL - Jennifer Owaesh - 168 - Ext. 183",
+  "presenceStatus": "Available",
+  "dndStatus": "TakeAllCalls",
+  "telephonyStatus": "NoCall"
+}
+```
+Agent is `available: true` only when all three conditions are met: `presenceStatus=Available`, `dndStatus=TakeAllCalls`, `telephonyStatus=NoCall`.
+
+**When you add a new queue in RingCentral:**
+1. Open `/queues` to confirm the queue appears and note its exact name
+2. Test: `/queue?name=EXACT_QUEUE_NAME`
+3. Build the Ringba ping URL: `/availability?state=XX` (or `/availability?state=XX&office=OfficeName` for multi-office)
 
 ---
 

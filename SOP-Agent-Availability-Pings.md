@@ -170,12 +170,67 @@ https://ringcentral-availability-api.onrender.com/availability?state=FL&office=P
 
 ---
 
+## Check a Specific Queue
+
+```
+https://ringcentral-availability-api.onrender.com/queue?name=Florida
+https://ringcentral-availability-api.onrender.com/queue?name=Florida%20-%20Tampa
+```
+Returns `available`, how many agents are free, and full member list with presence status.
+
+---
+
+## Check a Specific Agent
+
+Find the agent's RC extension number (visible in RingCentral Admin → Users):
+
+```
+https://ringcentral-availability-api.onrender.com/agent?ext=183
+```
+
+Response:
+```json
+{
+  "available": true,
+  "ext": "183",
+  "name": "ORL - Jennifer Owaesh - 168 - Ext. 183",
+  "presenceStatus": "Available",
+  "dndStatus": "TakeAllCalls",
+  "telephonyStatus": "NoCall"
+}
+```
+
+**Agent is available when all three are true:**
+- `presenceStatus` = `Available`
+- `dndStatus` = `TakeAllCalls` (DND is off)
+- `telephonyStatus` = `NoCall` (not on a call)
+
+**Common reasons for `available: false`:**
+| reason | meaning |
+|--------|---------|
+| `OnCall` | Agent is currently on a call |
+| `DND` | Agent has Do Not Disturb turned on |
+| `Busy` / `Offline` | Agent is away or logged out of RC |
+
+---
+
+## When You Add a New Queue in RingCentral
+
+1. Open `/queues` — confirm the queue appears and check the exact name
+2. Test it: `/queue?name=EXACT_NAME`
+3. Build the Ringba ping URL using that state/office
+4. Add to Ringba target with 30–60s polling interval
+
+---
+
 ## Useful Debug Endpoints
 
 | URL | What it shows |
 |-----|---------------|
 | `/queues` | All queues in RingCentral |
-| `/agents/debug` | All agents and their current presence status |
+| `/queue?name=Florida` | Specific queue status + agent presence |
+| `/agent?ext=183` | Single agent availability |
+| `/webhook-status` | Webhook active + cache stats |
 | `/health` | API status check |
 
 ---

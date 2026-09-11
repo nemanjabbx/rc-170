@@ -764,6 +764,51 @@ const server = http.createServer(async (req, res) => {
   }
 
 
+
+  // Debug: all extensions/groups in account
+  if (pathname === '/debug/all') {
+    try {
+      const token = await getAccessToken();
+      const types = ['User','Department','Announcement','Voicemail','DigitalUser','VirtualUser','FaxUser','PagingOnly','SharedLinesGroup','IvrMenu','ApplicationExtension','ParkedLocation'];
+      function rcGet(path) {
+        return new Promise((resolve) => {
+          const req = https.request({
+            hostname: 'platform.ringcentral.com',
+            path,
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` }
+          }, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{ try{resolve(JSON.parse(d))}catch(e){resolve({raw:d.slice(0,500)})} }); });
+          req.on('error', () => resolve(null));
+          req.end();
+        });
+      }
+      const [allExt, callQueues, ringGroups, ivrMenus] = await Promise.all([
+        rcGet('/restapi/v1.0/account/~/extension?perPage=1000&status=Enabled'),
+        rcGet('/restapi/v1.0/account/~/call-queues?perPage=1000'),
+        rcGet('/restapi/v1.0/account/~/ring-groups?perPage=1000'),
+        rcGet('/restapi/v1.0/account/~/ivr-menus?perPage=100'),
+      ]);
+      const extRecords = (allExt && allExt.records) || [];
+      const byType = {};
+      for (const e of extRecords) {
+        const t = e.type || 'Unknown';
+        if (!byType[t]) byType[t] = [];
+        byType[t].push({ id: e.id, ext: e.extensionNumber, name: e.name, status: e.status });
+      }
+      res.writeHead(200);
+      return res.end(JSON.stringify({
+        total_extensions: extRecords.length,
+        by_type: byType,
+        call_queues: callQueues,
+        ring_groups: ringGroups,
+        ivr_menus: ivrMenus
+      }, null, 2));
+    } catch (err) {
+      res.writeHead(500);
+      return res.end(JSON.stringify({ error: err.message }));
+    }
+  }
+
   // Debug: account info
   if (pathname === '/debug/account') {
     try {

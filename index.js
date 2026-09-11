@@ -299,7 +299,7 @@ async function getRingCXToken() {
     const body = `rcAccessToken=${encodeURIComponent(rcToken)}&rcTokenType=Bearer`;
     const options = {
       hostname: 'engage.ringcentral.com',
-      path: '/api/auth/login/rc/accesstoken',
+      path: '/api/public/auth/login/rc/accesstoken',
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',

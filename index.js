@@ -14,6 +14,7 @@ const RC_JWT = process.env.RC_JWT;
 // === RingCX (Contact Center) ===
 const RINGCX_ACCOUNT_ID = process.env.RINGCX_ACCOUNT_ID || '50560001';
 const RINGCX_GATE_GROUP_ID = '1973';
+const RINGCX_API_KEY = process.env.RINGCX_API_KEY || null;
 
 const STATE_GATE_MAP = {
   'AK': 12530, 'AL': 12475, 'AR': 12476, 'AZ': 12477, 'CA': 12478,
@@ -292,6 +293,9 @@ async function getAccessToken() {
 }
 
 async function getRingCXToken() {
+  // If API key is set, use it directly (no OAuth exchange needed)
+  if (RINGCX_API_KEY) return RINGCX_API_KEY;
+  // Fallback: RC OAuth token exchange
   const now = Date.now();
   if (ringcxTokenCache && now < ringcxTokenExpiry) return ringcxTokenCache;
   const rcToken = await getAccessToken();
@@ -315,7 +319,7 @@ async function getRingCXToken() {
           if (json.accessToken) {
             ringcxTokenCache = json.accessToken;
             ringcxTokenExpiry = now + (50 * 60 * 1000);
-            console.log('[RINGCX] Token obtained');
+            console.log('[RINGCX] Token obtained via RC exchange');
             resolve(ringcxTokenCache);
           } else {
             reject(new Error('No RingCX token: ' + data.slice(0, 300)));

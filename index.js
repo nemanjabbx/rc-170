@@ -763,6 +763,78 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+
+  // Debug: account info
+  if (pathname === '/debug/account') {
+    try {
+      const token = await getAccessToken();
+      const [accountInfo, extensionInfo, queuesRaw, extensionTypes] = await Promise.all([
+        new Promise((resolve) => {
+          const req = https.request({
+            hostname: 'platform.ringcentral.com',
+            path: '/restapi/v1.0/account/~',
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` }
+          }, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{ try{resolve(JSON.parse(d))}catch(e){resolve({raw:d})} }); });
+          req.on('error', () => resolve(null));
+          req.end();
+        }),
+        new Promise((resolve) => {
+          const req = https.request({
+            hostname: 'platform.ringcentral.com',
+            path: '/restapi/v1.0/account/~/extension/~',
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` }
+          }, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{ try{resolve(JSON.parse(d))}catch(e){resolve({raw:d})} }); });
+          req.on('error', () => resolve(null));
+          req.end();
+        }),
+        new Promise((resolve) => {
+          const req = https.request({
+            hostname: 'platform.ringcentral.com',
+            path: '/restapi/v1.0/account/~/call-queues?perPage=10',
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` }
+          }, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{ try{resolve(JSON.parse(d))}catch(e){resolve({raw:d})} }); });
+          req.on('error', () => resolve(null));
+          req.end();
+        }),
+        new Promise((resolve) => {
+          const req = https.request({
+            hostname: 'platform.ringcentral.com',
+            path: '/restapi/v1.0/account/~/extension?perPage=10&type=Department',
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` }
+          }, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{ try{resolve(JSON.parse(d))}catch(e){resolve({raw:d})} }); });
+          req.on('error', () => resolve(null));
+          req.end();
+        })
+      ]);
+      res.writeHead(200);
+      return res.end(JSON.stringify({
+        account: {
+          id: accountInfo && accountInfo.id,
+          mainNumber: accountInfo && accountInfo.mainNumber,
+          name: accountInfo && accountInfo.name,
+          status: accountInfo && accountInfo.status,
+          serviceInfo: accountInfo && accountInfo.serviceInfo && accountInfo.serviceInfo.brand && accountInfo.serviceInfo.brand.name
+        },
+        currentExtension: {
+          id: extensionInfo && extensionInfo.id,
+          extensionNumber: extensionInfo && extensionInfo.extensionNumber,
+          name: extensionInfo && extensionInfo.name,
+          type: extensionInfo && extensionInfo.type,
+          permissions: extensionInfo && extensionInfo.permissions
+        },
+        callQueues: queuesRaw,
+        departmentExtensions: extensionTypes
+      }, null, 2));
+    } catch (err) {
+      res.writeHead(500);
+      return res.end(JSON.stringify({ error: err.message }));
+    }
+  }
+
   // List all queues
   // Debug: raw RC response for queues
   if (pathname === '/queues/raw') {

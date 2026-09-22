@@ -7,6 +7,11 @@ const WEBHOOK_VERIFICATION_TOKEN = process.env.WEBHOOK_VERIFICATION_TOKEN || 'rc
 let webhookSubscriptionId = null;
 let webhookRenewalTimer = null;
 
+// === RingCX Agent State Webhook ===
+const RINGCX_RC_ACCOUNT_ID = process.env.RINGCX_RC_ACCOUNT_ID || '608230052';
+let ringcxWebhookSubscriptionId = null;
+let ringcxWebhookRenewalTimer = null;
+
 const RC_CLIENT_ID = process.env.RC_CLIENT_ID;
 const RC_CLIENT_SECRET = process.env.RC_CLIENT_SECRET;
 const RC_JWT = process.env.RC_JWT;
@@ -652,7 +657,10 @@ function handleWebhookPresence(body) {
       source: 'webhook',
       webhookAt: Date.now()
     });
-    console.log(`[WEBHOOK] ext ${extensionId}: ${prevStatus} → ${presence.presenceStatus}/${presence.telephonyStatus} dnd=${presence.dndStatus}`);
+    // Also invalidate RingCX inbound cache so next availability request fetches fresh data
+    realTimeInboundCache = null;
+    realTimeInboundCacheExpiry = 0;
+    console.log(`[WEBHOOK] ext ${extensionId}: ${prevStatus} → ${presence.presenceStatus}/${presence.telephonyStatus} dnd=${presence.dndStatus} — RingCX cache invalidated`);
   } catch(e) {
     console.error('[WEBHOOK] Parse error:', e.message, body.slice(0, 200));
   }
@@ -670,6 +678,117 @@ async function warmupCache() {
     console.log(`Cache warmed: ${queues.length} queues (presence fetched on-demand)`);
   } catch (err) {
     console.error('Cache warmup failed:', err.message);
+  }
+}
+
+// --- RingCX Agent State Webhook ---
+async function deleteRingCXSubscriptions(cxToken) {
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: 'engage.ringcentral.com',
+      path: `/voice/api/cx/integration/v1/accounts/${RINGCX_RC_ACCOUNT_ID}/sub-accounts/${RINGCX_ACCOUNT_ID}/agent-states/subscriptions`,
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${cxToken}` }
+    }, (res) => {
+      let d = ''; res.on('data', c => d += c);
+      res.on('end', async () => {
+        try {
+          const subs = JSON.parse(d);
+          const list = Array.isArray(subs) ? subs : (subs.records || []);
+          console.log(`[CX-WEBHOOK] Found ${list.length} existing subscriptions`);
+          for (const sub of list) {
+            await new Promise((done) => {
+              const delReq = https.request({
+                hostname: 'engage.ringcentral.com',
+                path: `/voice/api/cx/integration/v1/accounts/${RINGCX_RC_ACCOUNT_ID}/sub-accounts/${RINGCX_ACCOUNT_ID}/agent-states/subscriptions/${sub.id || sub.subscriptionId}`,
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${cxToken}` }
+              }, (r) => { r.resume(); r.on('end', done); });
+              delReq.on('error', done);
+              delReq.end();
+            });
+            console.log(`[CX-WEBHOOK] Deleted subscription: ${sub.id || sub.subscriptionId}`);
+          }
+        } catch(e) { console.error('[CX-WEBHOOK] Delete error:', e.message); }
+        resolve();
+      });
+    });
+    req.on('error', () => resolve());
+    req.end();
+  });
+}
+
+async function createRingCXAgentStateSubscription(cxToken) {
+  if (!WEBHOOK_URL) {
+    console.log('[CX-WEBHOOK] WEBHOOK_URL not set, skipping RingCX subscription');
+    return;
+  }
+  const notificationUrl = WEBHOOK_URL.replace(/\/$/, '') + '/ringcx-webhook';
+  const body = JSON.stringify({ subscriptionName: "rc-170-agent-state", notificationUrl, isActive: true });
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: 'engage.ringcentral.com',
+      path: `/voice/api/cx/integration/v1/accounts/${RINGCX_RC_ACCOUNT_ID}/sub-accounts/${RINGCX_ACCOUNT_ID}/agent-states/subscriptions`,
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${cxToken}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    }, (res) => {
+      let d = ''; res.on('data', c => d += c);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(d);
+          if (json.id || json.subscriptionId) {
+            ringcxWebhookSubscriptionId = json.id || json.subscriptionId;
+            console.log(`[CX-WEBHOOK] Subscription created: ${ringcxWebhookSubscriptionId}`);
+            scheduleRingCXWebhookRenewal();
+            resolve(json);
+          } else {
+            console.error('[CX-WEBHOOK] Subscription failed:', d.slice(0, 300));
+            resolve(null);
+          }
+        } catch(e) { console.error('[CX-WEBHOOK] Parse error:', e.message); resolve(null); }
+      });
+    });
+    req.on('error', (err) => { console.error('[CX-WEBHOOK] Request error:', err.message); resolve(null); });
+    req.write(body);
+    req.end();
+  });
+}
+
+function scheduleRingCXWebhookRenewal() {
+  if (ringcxWebhookRenewalTimer) clearTimeout(ringcxWebhookRenewalTimer);
+  ringcxWebhookRenewalTimer = setTimeout(async () => {
+    try {
+      console.log('[CX-WEBHOOK] Renewing RingCX subscription...');
+      const cxToken = await getRingCXToken();
+      await createRingCXAgentStateSubscription(cxToken);
+    } catch(err) {
+      console.error('[CX-WEBHOOK] Renewal failed:', err.message);
+    }
+  }, 23 * 60 * 60 * 1000);
+}
+
+async function setupRingCXWebhookWithRetry(attempt = 1) {
+  try {
+    const cxToken = await getRingCXToken();
+    if (attempt === 1) await deleteRingCXSubscriptions(cxToken);
+    await createRingCXAgentStateSubscription(cxToken);
+    if (!ringcxWebhookSubscriptionId) {
+      const maxAttempts = 5;
+      if (attempt < maxAttempts) {
+        const delay = attempt * 3 * 60 * 1000;
+        console.log(`[CX-WEBHOOK] Failed (attempt ${attempt}/${maxAttempts}), retrying in ${attempt * 3} min...`);
+        setTimeout(() => setupRingCXWebhookWithRetry(attempt + 1), delay);
+      } else {
+        console.error('[CX-WEBHOOK] All retry attempts failed — running in polling mode.');
+      }
+    }
+  } catch(err) {
+    console.error(`[CX-WEBHOOK] Setup error (attempt ${attempt}): ${err.message}`);
+    if (attempt < 5) setTimeout(() => setupRingCXWebhookWithRetry(attempt + 1), attempt * 3 * 60 * 1000);
   }
 }
 
@@ -1307,6 +1426,38 @@ const server = http.createServer(async (req, res) => {
   }
 
   res.writeHead(404);
+  // RingCX Agent State Webhook receiver
+  if (pathname === '/ringcx-webhook') {
+    const validationToken = req.headers['validation-token'];
+    if (validationToken) {
+      console.log('[CX-WEBHOOK] Validation request received');
+      res.writeHead(200, { 'Validation-Token': validationToken });
+      return res.end();
+    }
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', c => body += c);
+      req.on('end', () => {
+        // Invalidate cache on any agent state change — next request fetches fresh data
+        realTimeInboundCache = null;
+        realTimeInboundCacheExpiry = 0;
+        try {
+          const data = JSON.parse(body);
+          const agentState = data.agentState || (data.body && data.body.agentState) || 'unknown';
+          const agentId = data.agentId || (data.body && data.body.agentId) || '?';
+          console.log(`[CX-WEBHOOK] Agent ${agentId} state: ${agentState} — cache invalidated`);
+        } catch(e) {
+          console.log('[CX-WEBHOOK] Agent state change received — cache invalidated');
+        }
+        res.writeHead(200);
+        res.end();
+      });
+      return;
+    }
+    res.writeHead(200);
+    return res.end();
+  }
+
   res.end(JSON.stringify({ error: 'Not found. Available: /availability?state=TX, /agent?id=xxx, /queue?name=QueueName, /queues, /calls, /call?number=5551234567' }));
 });
 
@@ -1339,4 +1490,6 @@ server.listen(PORT, async () => {
   console.log('Skipping warmup - cache will populate on demand');
   // Delay initial webhook setup by 10s to let rate limit cooldown after busy deploys
   setTimeout(() => setupWebhookWithRetry(1), 10000);
+  // RingCX cache is invalidated by RC Platform presence webhook (handleWebhookPresence)
+  // No separate RingCX subscription needed — RC Platform webhook covers agent state changes
 });

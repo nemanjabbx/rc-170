@@ -93,6 +93,10 @@ let extensionsCache = null;
 let extensionsCacheExpiry = 0;
 const EXTENSIONS_TTL = 10 * 60 * 1000; // 10 minutes
 
+let realTimeInboundCache = null;
+let realTimeInboundCacheExpiry = 0;
+const REALTIME_INBOUND_TTL = 30 * 1000; // 30 seconds
+
 async function getPresenceCached(token, extensionId) {
   const now = Date.now();
   const cached = presenceCache.get(extensionId);
@@ -295,9 +299,8 @@ async function getAccessToken() {
 }
 
 async function getRingCXToken() {
-  // If API key is set, use it directly (no OAuth exchange needed)
-  if (RINGCX_API_KEY) return RINGCX_API_KEY;
-  // Fallback: RC OAuth token exchange
+  // Always use RC OAuth token exchange (RINGCX_API_KEY is deprecated format)
+  // RC OAuth token exchange
   const now = Date.now();
   if (ringcxTokenCache && now < ringcxTokenExpiry) return ringcxTokenCache;
   const rcToken = await getAccessToken();
@@ -724,49 +727,89 @@ const server = http.createServer(async (req, res) => {
     }));
   }
 
-  // Availability via client ping API /availability?state=FL
+  // Availability via RingCX realTimeData/inbound (direct)
   if (pathname === '/availability') {
     const state = url.searchParams.get('state');
     if (!state) {
       res.writeHead(400);
       return res.end(JSON.stringify({ available: false, error: 'Missing state parameter. Use ?state=TX' }));
     }
-    const stateUpper = state.toUpperCase().trim();
-    const campaign = url.searchParams.get('campaign') || 'standard';
-    if (!CLIENT_JWT) {
-      res.writeHead(500);
-      return res.end(JSON.stringify({ available: false, error: 'CLIENT_JWT env var not set' }));
+    let stateUpper = state.toUpperCase().trim();
+    // Normalize full state name to code (e.g. "Georgia" -> "GA")
+    const NAME_TO_CODE = Object.fromEntries(Object.entries(STATE_NAME_MAP).map(([k, v]) => [v.toUpperCase(), k]));
+    if (NAME_TO_CODE[stateUpper]) stateUpper = NAME_TO_CODE[stateUpper];
+    const gateId = STATE_GATE_MAP[stateUpper];
+    if (!gateId) {
+      res.writeHead(200);
+      return res.end(JSON.stringify({ available: false, state: stateUpper, error: 'Unknown state' }));
     }
+    const minAgents = parseInt(url.searchParams.get('min_agents') || '1', 10);
     try {
-      const pingResult = await new Promise((resolve, reject) => {
-        const req = https.request({
-          hostname: CLIENT_PING_HOST,
-          path: `/ping?campaign=${encodeURIComponent(campaign)}&state=${encodeURIComponent(stateUpper)}`,
-          method: 'GET',
-          headers: { 'Authorization': `Bearer ${CLIENT_JWT}` }
-        }, (r) => {
-          let d = '';
-          r.on('data', c => d += c);
-          r.on('end', () => {
-            try { resolve(JSON.parse(d)); }
-            catch(e) { reject(new Error('Parse error: ' + d.slice(0, 200))); }
-          });
-        });
-        req.on('error', reject);
-        req.end();
-      });
+      // Use cached inbound data (30s TTL)
+      const now = Date.now();
+      if (!realTimeInboundCache || now >= realTimeInboundCacheExpiry) {
+        const cxToken = await getRingCXToken();
+        const result = await ringcxGet(cxToken, `/voice/api/v1/admin/accounts/${RINGCX_ACCOUNT_ID}/realTimeData/inbound`, 'ringcx.ringcentral.com');
+        if (Array.isArray(result.body)) {
+          realTimeInboundCache = result.body;
+          realTimeInboundCacheExpiry = now + REALTIME_INBOUND_TTL;
+        }
+      }
+      const gate = realTimeInboundCache ? realTimeInboundCache.find(g => g.gateId === gateId) : null;
+      if (!gate) {
+        res.writeHead(200);
+        return res.end(JSON.stringify({ available: false, state: stateUpper, error: 'Gate not found in realTimeData' }));
+      }
+      const available = gate.available >= minAgents && gate.state === 'Open' && gate.selectable !== false;
       res.writeHead(200);
       return res.end(JSON.stringify({
-        available: pingResult.accept === true,
-        accept: pingResult.accept,
+        available,
+        accept: available,
         state: stateUpper,
-        campaign: pingResult.campaign || campaign,
-        queue_open: pingResult.queue_open,
-        data_age_seconds: pingResult.data_age_seconds,
-        raw: pingResult
+        state_name: STATE_NAME_MAP[stateUpper] || stateUpper,
+        campaign: 'Standard vs Preferred',
+        queue_open: gate.state === 'Open',
+        agents: gate.available,
+        active_calls: gate.active,
+        staffed: gate.staffed,
+        in_queue: gate.inQueue,
+        gate_id: gateId,
+        last_update: gate.lastUpdate
       }));
     } catch (err) {
-      console.error('[PING] availability error:', err.message);
+      console.error('[AVAILABILITY] RingCX error:', err.message);
+      // Fallback to CLIENT_JWT proxy if available
+      if (CLIENT_JWT) {
+        try {
+          const campaign = url.searchParams.get('campaign') || 'standard';
+          const pingResult = await new Promise((resolve, reject) => {
+            const req = https.request({
+              hostname: CLIENT_PING_HOST,
+              path: `/ping?campaign=${encodeURIComponent(campaign)}&state=${encodeURIComponent(stateUpper)}`,
+              method: 'GET',
+              headers: { 'Authorization': `Bearer ${CLIENT_JWT}` }
+            }, (r) => {
+              let d = '';
+              r.on('data', c => d += c);
+              r.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { reject(new Error('Parse error: ' + d.slice(0, 200))); } });
+            });
+            req.on('error', reject);
+            req.end();
+          });
+          res.writeHead(200);
+          return res.end(JSON.stringify({
+            available: pingResult.accept === true,
+            accept: pingResult.accept,
+            state: stateUpper,
+            campaign: pingResult.campaign || campaign,
+            queue_open: pingResult.queue_open,
+            data_age_seconds: pingResult.data_age_seconds,
+            fallback: true
+          }));
+        } catch (err2) {
+          console.error('[PING] fallback error:', err2.message);
+        }
+      }
       res.writeHead(200);
       return res.end(JSON.stringify({ available: false, accept: false, error: err.message }));
     }
